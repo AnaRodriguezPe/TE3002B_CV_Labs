@@ -1,286 +1,168 @@
-"""
-Traffic Sign Classification using SIFT Descriptors
-Exercise - Image Classification Pipeline
-
-This script classifies traffic signs using SIFT (Scale-Invariant Feature Transform)
-descriptors with FLANN-based matching against reference images.
-
-Signs:
-  - AVG Parking (green circular sign)
-  - Pedestrians (blue circular sign)
-  - Stop (red octagonal sign)
-
-Reference images: parking.jpg, pedestrians.png, stop.jpg (provided as vectorial prints)
-"""
-
 import cv2
-import numpy as np
 import os
-import matplotlib.pyplot as plt
-from pathlib import Path
+import numpy as np
 
-# ─────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────
-REFERENCE_IMAGES = {
-    "AVG Parking": "parking.jpg",
-    "Pedestrians": "pedestrians.png",
-    "Stop":        "stop.jpg",
+# --------------------------
+# CONFIGURATION
+# --------------------------
+folder = "fotos"
+
+classes = {
+    "stop": [],
+    "pedestrian": [],
+    "parking": []
 }
 
-PHOTOS_FOLDER = "fotos"
- 
-# Minimum number of good matches to consider a sign detected
-MIN_MATCH_COUNT = 8
+# Test images outside training folder
+tests = [
+    ("stop_test.png", "stop"),
+    ("pedestrian_test.png", "pedestrian"),
+    ("parking_test.png", "parking")
+]
 
-# Lowe's ratio test threshold
-RATIO_THRESH = 0.75
+# --------------------------
+# LOAD TRAINING IMAGES
+# --------------------------
+print("Loading training images...\n")
 
+for file in os.listdir(folder):
+    path = os.path.join(folder, file)
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
-
-def load_image(path: str) -> np.ndarray:
-    """Load image in BGR; raise FileNotFoundError if missing."""
     img = cv2.imread(path)
+
     if img is None:
-        raise FileNotFoundError(f"Cannot read image: {path}")
-    return img
+        continue
 
+    img = cv2.resize(img, (350, 350))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-def extract_sift(img_bgr: np.ndarray, sift):
-    """Convert to grayscale and extract SIFT keypoints + descriptors."""
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    kp, des = sift.detectAndCompute(gray, None)
-    return kp, des
+    if file.startswith("stop"):
+        classes["stop"].append(gray)
 
+    elif file.startswith("pedestrian"):
+        classes["pedestrian"].append(gray)
 
-def match_descriptors(des_ref, des_query, flann):
-    """
-    FLANN kNN matching with Lowe's ratio test.
-    Returns the list of good matches.
-    """
-    if des_ref is None or des_query is None:
-        return []
-    if len(des_ref) < 2 or len(des_query) < 2:
-        return []
+    elif file.startswith("parking"):
+        classes["parking"].append(gray)
 
-    matches = flann.knnMatch(des_ref, des_query, k=2)
-    good = []
-    for pair in matches:
-        if len(pair) == 2:
-            m, n = pair
-            if m.distance < RATIO_THRESH * n.distance:
-                good.append(m)
-    return good
+for label in classes:
+    print(f"{label}: {len(classes[label])} training images loaded")
 
+# --------------------------
+# CREATE SIFT
+# --------------------------
+print("\nCreating SIFT detector...")
+sift = cv2.SIFT_create()
+bf = cv2.BFMatcher()
 
-def classify_image(query_bgr: np.ndarray, references: dict, sift, flann) -> tuple:
-    """
-    Classify a query image against all reference sign descriptors.
-    Returns (best_label, best_match_count, all_scores).
-    """
-    kp_q, des_q = extract_sift(query_bgr, sift)
+# --------------------------
+# EXTRACT DESCRIPTORS
+# --------------------------
+print("Extracting descriptors...\n")
 
-    scores = {}
-    for label, (kp_r, des_r) in references.items():
-        good = match_descriptors(des_r, des_q, flann)
-        scores[label] = len(good)
+database = {}
 
-    best_label = max(scores, key=scores.get)
-    best_count = scores[best_label]
+for label in classes:
+    database[label] = []
 
-    if best_count < MIN_MATCH_COUNT:
-        best_label = "Unknown"
+    for img in classes[label]:
+        kp, des = sift.detectAndCompute(img, None)
 
-    return best_label, best_count, scores
+        if des is not None:
+            database[label].append(des)
 
+    print(f"{label}: {len(database[label])} descriptor sets stored")
 
-def draw_matches_panel(ref_bgr, kp_r, query_bgr, kp_q, good_matches, label):
-    """Return a side-by-side match visualization."""
-    vis = cv2.drawMatches(
-        ref_bgr, kp_r, query_bgr, kp_q, good_matches[:20], None,
-        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-    )
-    h, w = vis.shape[:2]
-    cv2.putText(vis, f"Classified as: {label}", (10, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    return vis
+# --------------------------
+# CLASSIFICATION FUNCTION
+# --------------------------
+def classify_image(filename, expected_label):
 
+    print("\n----------------------------------")
+    print(f"Testing image: {filename}")
+    print(f"Expected class: {expected_label}")
 
-# ─────────────────────────────────────────────
-# Main pipeline
-# ─────────────────────────────────────────────
+    test = cv2.imread(filename)
 
-def main():
-    print("=" * 60)
-    print("  Traffic Sign Classification — SIFT Descriptor Pipeline")
-    print("=" * 60)
-
-    # ── 1. Initialise SIFT & FLANN ──────────────────────────────
-    sift = cv2.SIFT_create()
-
-    FLANN_INDEX_KDTREE = 1
-    index_params  = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-    search_params = dict(checks=50)
-    flann = cv2.FlannBasedMatcher(index_params, search_params)
-
-    # ── 2. Load & index reference images ───────────────────────
-    print("\n[1] Loading reference images …")
-    references     = {}   # label → (kp, des)
-    ref_images_bgr = {}   # label → bgr array (for visualisation)
-
-    for label, path in REFERENCE_IMAGES.items():
-        if not os.path.exists(path):
-            print(f"  ✗ Reference missing: {path}  (skipping {label})")
-            continue
-        img = load_image(path)
-        kp, des = extract_sift(img, sift)
-        references[label]     = (kp, des)
-        ref_images_bgr[label] = img
-        print(f"  ✓ {label:20s}  keypoints={len(kp):4d}  path={path}")
-
-    if not references:
-        print("ERROR: No reference images found. Exiting.")
+    if test is None:
+        print("Image not found.")
         return
 
-    # ── 3. Collect query images from fotos/ ────────────────────
-    print(f"\n[2] Scanning query images in '{PHOTOS_FOLDER}/' …")
-    exts = {".jpg", ".jpeg", ".png", ".bmp"}
-    photo_paths = sorted(
-        p for p in Path(PHOTOS_FOLDER).glob("*")
-        if p.suffix.lower() in exts
-    )
+    test = cv2.resize(test, (350, 350))
+    gray_test = cv2.cvtColor(test, cv2.COLOR_BGR2GRAY)
 
-    if not photo_paths:
-        print(f"  No images found in '{PHOTOS_FOLDER}/'. "
-              "Generating synthetic test with reference images instead …")
-        # Fall back: test against the reference images themselves
-        photo_paths = [Path(v) for v in REFERENCE_IMAGES.values() if os.path.exists(v)]
+    kp_test, des_test = sift.detectAndCompute(gray_test, None)
 
-    print(f"  Found {len(photo_paths)} query image(s).")
+    if des_test is None:
+        print("No descriptors found.")
+        return
 
-    # ── 4. Classify each query image ───────────────────────────
-    print("\n[3] Classifying …\n")
-    print(f"  {'Image':<35} {'Predicted':<20} {'Matches'}")
-    print("  " + "-" * 65)
+    best_label = "Unknown"
+    best_score = 0
 
-    results          = []   # (path, predicted, scores)
-    correct          = 0
-    total_with_gt    = 0
+    for label in database:
 
-    # Ground truth inference from filename prefix (parking/pedestrians/stop)
-    gt_map = {
-        "parking":     "AVG Parking",
-        "pedestrians": "Pedestrians",
-        "stop":        "Stop",
-    }
+        total_matches = 0
 
-    for p in photo_paths:
-        try:
-            query = load_image(str(p))
-        except FileNotFoundError as e:
-            print(f"  ! {e}")
-            continue
+        for des_ref in database[label]:
 
-        predicted, best_count, scores = classify_image(query, references, sift, flann)
-        results.append((p, predicted, scores))
+            matches = bf.knnMatch(des_ref, des_test, k=2)
 
-        # Ground truth (if filename contains a keyword)
-        gt = None
-        for key, lbl in gt_map.items():
-            if key in p.stem.lower():
-                gt = lbl
-                break
+            good = []
 
-        match_str = "  ".join(f"{k}: {v}" for k, v in scores.items())
-        correct_flag = ""
-        if gt is not None:
-            total_with_gt += 1
-            if predicted == gt:
-                correct += 1
-                correct_flag = "✓"
-            else:
-                correct_flag = f"✗ (GT={gt})"
+            for m, n in matches:
+                if m.distance < 0.75 * n.distance:
+                    good.append(m)
 
-        print(f"  {p.name:<35} {predicted:<20} {best_count:3d}  {correct_flag}")
+            total_matches += len(good)
 
-    # ── 5. Accuracy summary ────────────────────────────────────
-    print("\n[4] Summary")
-    print("  " + "-" * 65)
-    if total_with_gt > 0:
-        acc = correct / total_with_gt * 100
-        print(f"  Accuracy (images with ground-truth label): "
-              f"{correct}/{total_with_gt} = {acc:.1f}%")
+        print(f"Matches with {label}: {total_matches}")
+
+        if total_matches > best_score:
+            best_score = total_matches
+            best_label = label
+
+    # Result
+    print(f"\nPredicted class: {best_label}")
+    print(f"Best score: {best_score}")
+
+    if best_label == expected_label:
+        print("Result: CORRECT")
+        color = (0, 255, 0)
     else:
-        print("  (No ground-truth labels inferred from filenames.)")
+        print("Result: INCORRECT")
+        color = (0, 0, 255)
 
-    # ── 6. Visualisation ───────────────────────────────────────
-    print("\n[5] Generating match visualisation figures …")
+    # Show image
+    cv2.putText(test,
+                f"Predicted: {best_label}",
+                (15, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2)
 
-    # Show one representative match per sign class
-    shown = set()
-    fig_rows = []
+    cv2.putText(test,
+                f"Expected: {expected_label}",
+                (15, 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2)
 
-    for p, predicted, scores in results:
-        if predicted == "Unknown" or predicted in shown:
-            continue
-        shown.add(predicted)
+    cv2.imshow("Classification Result", test)
+    cv2.waitKey(0)
 
-        query = load_image(str(p))
-        ref_bgr = ref_images_bgr[predicted]
-        kp_r, des_r = references[predicted]
-        kp_q, des_q = extract_sift(query, sift)
-        good = match_descriptors(des_r, des_q, flann)
+# --------------------------
+# RUN ALL TESTS
+# --------------------------
+print("\nStarting automatic tests...")
 
-        vis = draw_matches_panel(ref_bgr, kp_r, query, kp_q, good, predicted)
-        fig_rows.append((predicted, vis))
+correct = 0
 
-    if fig_rows:
-        n = len(fig_rows)
-        fig, axes = plt.subplots(n, 1, figsize=(14, 5 * n))
-        if n == 1:
-            axes = [axes]
-        for ax, (label, vis) in zip(axes, fig_rows):
-            ax.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
-            ax.set_title(f"Best matches — {label}", fontsize=13, fontweight="bold")
-            ax.axis("off")
-        plt.tight_layout()
-        out_path = "sift_image_matches.png"
-        plt.savefig(out_path, dpi=100)
-        print(f"  ✓ Saved: {out_path}")
-        plt.show()
+for filename, expected in tests:
+    classify_image(filename, expected)
 
-    # ── 7. Per-class bar chart ─────────────────────────────────
-    if results:
-        labels_all = list(references.keys())
-        # Average match count per true class
-        class_scores = {l: [] for l in labels_all}
-        for p, predicted, scores in results:
-            for key, v in scores.items():
-                class_scores[key].append(v)
+cv2.destroyAllWindows()
 
-        fig2, ax2 = plt.subplots(figsize=(8, 4))
-        x      = np.arange(len(labels_all))
-        avgs   = [np.mean(class_scores[l]) if class_scores[l] else 0 for l in labels_all]
-        colors = ["#2ecc71", "#3498db", "#e74c3c"]
-        bars   = ax2.bar(x, avgs, color=colors, edgecolor="black", linewidth=0.8)
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(labels_all, fontsize=11)
-        ax2.set_ylabel("Average SIFT good matches")
-        ax2.set_title("Average SIFT match count per reference class (all query images)")
-        for bar, val in zip(bars, avgs):
-            ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                     f"{val:.1f}", ha="center", va="bottom", fontsize=9)
-        plt.tight_layout()
-        out2 = "sift_match_counts.png"
-        plt.savefig(out2, dpi=100)
-        print(f"  ✓ Saved: {out2}")
-        plt.show()
-
-    print("\nDone. ✓")
-
-
-if __name__ == "__main__":
-    main()
+print("\nAll tests completed.")
